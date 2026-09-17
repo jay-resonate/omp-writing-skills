@@ -49,10 +49,20 @@ function makeRegexFinder(re) {
   };
 }
 
+// A markdown table row is layout, not a sentence: neighbouring rows repeat cell
+// values by design, so run detectors must not read them as repeated prose.
+function inTableRow(text, index) {
+  let i = index;
+  while (i > 0 && text[i - 1] !== "\n") i -= 1;
+  while (i < text.length && (text[i] === " " || text[i] === "\t")) i += 1;
+  return text[i] === "|";
+}
+
 function makeEchoFinder({ minGram = 3, minRun = 2 } = {}) {
   const SENT = /[^.!?\n]+[.!?]?/g;
   const grams = (s, n) => {
-    const w = s.toLowerCase().match(/[a-z0-9'’-]+/g) || [];
+    // INVARIANT: a word starts on a letter or digit; a leading hyphen is a list marker.
+    const w = s.toLowerCase().match(/[a-z0-9][a-z0-9'’-]*/g) || [];
     const out = new Set();
     for (let i = 0; i + n <= w.length; i++) out.add(w.slice(i, i + n).join(" "));
     return out;
@@ -60,6 +70,7 @@ function makeEchoFinder({ minGram = 3, minRun = 2 } = {}) {
   return function (text) {
     const sents = [];
     for (const m of text.matchAll(SENT)) {
+      if (inTableRow(text, m.index)) continue;
       if ((m[0].match(/\S+/g) || []).length >= 4) {
         sents.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
       }
@@ -127,7 +138,8 @@ function makeAnaphoraFinder({ minRun = 3 } = {}) {
   return function (text) {
     const sents = [];
     for (const m of text.matchAll(SENT)) {
-      const w = m[0].match(/[A-Za-z'’-]+/);
+      // INVARIANT: a hyphen belongs inside a word (state-change), never at its start.
+      const w = m[0].match(/[A-Za-z][A-Za-z'’-]*/);
       if (w) {
         sents.push({
           start: m.index + m[0].indexOf(w[0]),
@@ -163,7 +175,29 @@ function makeAnaphoraFinder({ minRun = 3 } = {}) {
   };
 }
 
+const WILLISON_GROUP = "LLM cliché highlighter (Willison)";
 const WIKI_GROUP = "Signs of AI writing (Wikipedia)";
+
+// Tells decay as models are trained against them, so an entry has to carry the
+// catalogue version it shipped in and the source that justified it.
+export const CATALOGUE_VERSION = "1.1.0";
+
+export const SOURCES = {
+  [WILLISON_GROUP]: {
+    url: "https://github.com/simonw/tools/blob/main/llm-cliche-highlighter.html",
+    retrieved: "2026-09-02",
+  },
+  [WIKI_GROUP]: {
+    url: "https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing",
+    retrieved: "2026-09-02",
+  },
+};
+
+// Entries predating provenance tracking are the Willison port as it shipped at 1.0.0.
+export function patternMeta(p) {
+  const group = p.group || WILLISON_GROUP;
+  return { group, since: p.since || "1.0.0", source: p.source || SOURCES[group]?.url || "" };
+}
 
 export const patterns = [
   {
@@ -580,6 +614,19 @@ export const patternCases = [
   ],
   ["echo-triad", "The parser is fast today. The renderer is fast today.", 0, []],
   ["echo-triad", "The parser is fast. The tests are slow.", 0, []],
+  ["echo-triad", "- The parser is fast.\n- The parser is slow.", 0, []],
+  [
+    "echo-triad",
+    "| Slice | Repo | Branch | Worktree | Terminal | PR | Status |\n|---|---|---|---|---|---|---|\n| Handler raise | resonate-append | jay-resonate/handler | created | term live | not opened yet | in progress |\n| Prod alarm | resonate-append | jay-resonate/alarm | created | term live | not opened yet | in progress |",
+    0,
+    [],
+  ],
+  [
+    "echo-triad",
+    "| Slice | Repo |\n|---|---|\n| Handler raise | resonate-append |\nThe parser is a state machine. The renderer is a state machine.",
+    1,
+    [2],
+  ],
   ["performative-honesty", "I won't pretend the migration was painless.", 1],
   ["performative-honesty", "Let's be honest: nobody reads the docs.", 1],
   ["performative-honesty", "To be clear, the API is unchanged.", 1],
@@ -613,6 +660,8 @@ export const patternCases = [
   ["sentence-anaphora", "Maybe nobody needed it. Maybe the timing was off.", 0, []],
   ["sentence-anaphora", "The parser is small. The renderer is small. The scheduler is small.", 0, []],
   ["sentence-anaphora", "Everything changed. Everything slowed down. Everything cost more.", 1, [3]],
+  ["sentence-anaphora", "- Alpha does a thing.\n- Beta does another thing.\n- Gamma does a third thing.", 0, []],
+  ["sentence-anaphora", "- Maybe nobody needed it.\n- Maybe the timing was off.\n- Maybe both were true.", 1, [3]],
   ["colon-triple", "The fix needs three things: separate ports, separate processes, and separate state.", 1],
   ["colon-triple", "Each service gets its own everything: ports, processes, local state.", 1],
   ["colon-triple", "The recipe calls for flour, butter, and sugar.", 0],
@@ -712,6 +761,9 @@ export function runSelfTest() {
   if (hits.length !== 2) {
     failures.push(`code-mask: expected 2 ai-vocab hits in masked prose, got ${hits.length}`);
   }
+  for (const p of patterns) {
+    if (!patternMeta(p).source) failures.push(`${p.id}: no source for group ${patternMeta(p).group}`);
+  }
   return failures;
 }
 
@@ -721,11 +773,13 @@ function parseArgs(argv) {
   let json = false;
   let list = false;
   let selfTest = false;
+  let version = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") json = true;
     else if (a === "--list") list = true;
     else if (a === "--self-test") selfTest = true;
+    else if (a === "--version") version = true;
     else if (a === "--off") {
       const ids = (argv[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
       for (const id of ids) off.add(id);
@@ -737,7 +791,7 @@ function parseArgs(argv) {
       files.push(a);
     }
   }
-  return { off, files, json, list, selfTest };
+  return { off, files, json, list, selfTest, version };
 }
 
 function lintText(text, enabled) {
@@ -758,7 +812,7 @@ function lintText(text, enabled) {
 }
 
 function usage() {
-  return `usage: cliche-lint.mjs [--json] [--list] [--self-test] [--off id,id] <file> [...]
+  return `usage: cliche-lint.mjs [--json] [--list] [--self-test] [--version] [--off id,id] <file> [...]
 Exit 0 = clean. Exit 1 = findings. Exit 2 = error.`;
 }
 
@@ -773,6 +827,10 @@ function main(argv) {
     console.error(usage());
     return 2;
   }
+  if (args.version) {
+    console.log(CATALOGUE_VERSION);
+    return 0;
+  }
   if (args.selfTest) {
     const failures = runSelfTest();
     if (failures.length) {
@@ -784,9 +842,17 @@ function main(argv) {
     return 0;
   }
   if (args.list) {
-    for (const p of patterns) {
-      const group = p.group ? ` [${p.group}]` : "";
-      console.log(`${p.id}\t${p.name}${group}`);
+    const rows = patterns.map((p) => ({ id: p.id, name: p.name, ...patternMeta(p) }));
+    if (args.json) {
+      console.log(JSON.stringify({ catalogueVersion: CATALOGUE_VERSION, sources: SOURCES, patterns: rows }, null, 2));
+      return 0;
+    }
+    console.log(`catalogue ${CATALOGUE_VERSION}`);
+    for (const r of rows) {
+      console.log(`${r.id}\t${r.name}\tsince ${r.since}\t[${r.group}]`);
+    }
+    for (const [group, src] of Object.entries(SOURCES)) {
+      console.log(`# ${group}: ${src.url} (retrieved ${src.retrieved})`);
     }
     return 0;
   }

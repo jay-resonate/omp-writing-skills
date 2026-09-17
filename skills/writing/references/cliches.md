@@ -10,9 +10,12 @@ Run:
 skills/writing/scripts/cliche-lint.mjs --list
 skills/writing/scripts/lint.sh draft.md
 skills/writing/scripts/cliche-lint.mjs --off colon-triple,fits-in-your-head draft.md
+skills/writing/scripts/cliche-lint.mjs --version   # catalogue version; --list shows each entry's source
 ```
 
-Fenced code and inline code are masked before matching.
+Fenced code and inline code are masked before matching. Markdown structure is not prose either: a list marker never counts as a sentence's first word, and `echo-triad` skips table rows, whose cells repeat by design. Cell text is still matched by every other detector.
+Every entry carries a source and the catalogue version it shipped in. Adding, retiring, or
+measuring tells is `scripts/CATALOGUE.md`; tells decay, so the catalogue is maintained, not frozen.
 
 ## Willison patterns
 
